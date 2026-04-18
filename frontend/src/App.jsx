@@ -2,7 +2,7 @@ import { useState } from 'react'
 import axios from 'axios'
 
 const api = axios.create({
-  baseURL: '/',
+  baseURL: 'https://google-map-backend-6jsd.onrender.com',
 })
 
 const getErrorMessage = (error, fallbackMessage) => {
