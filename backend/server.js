@@ -1,13 +1,13 @@
 const express = require('express');
 const cors = require('cors');
 
-require('dotenv').config();
+// require('dotenv').config();
 
 const { scrapeGoogleMaps, ScraperError } = require('./scraper');
 const { createBusinessWorkbookBuffer } = require('./utils/excel');
 
 const app = express();
-const port = Number(process.env.PORT) || 5000;
+const port = 5000;
 
 let latestSearchCache = {
   businesses: [],
