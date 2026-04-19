@@ -200,10 +200,20 @@ const scrapeGoogleMaps = async ({ query, location }) => {
   let browser;
 
   try {
+    // browser = await puppeteer.launch({
+    //   headless: true,
+    //   args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    // });
     browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--single-process',
+      '--disable-gpu',
+    ],
+  });
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 1024 });
@@ -228,14 +238,26 @@ const scrapeGoogleMaps = async ({ query, location }) => {
       rating: normalizeText(business.rating) || 'N/A',
       address: normalizeText(business.address) || 'N/A',
     }));
-  } catch (error) {
+  // } catch (error) {
+  //   if (error instanceof ScraperError) {
+  //     throw error;
+  //   }
+
+  //   throw new ScraperError('Failed to scrape Google Maps results.', 500, {
+  //     message: error.message,
+  //   });
+    } catch (error) {
+    console.error('Scraper failure:', error);
     if (error instanceof ScraperError) {
       throw error;
     }
 
     throw new ScraperError('Failed to scrape Google Maps results.', 500, {
       message: error.message,
+      stack: error.stack,
     });
+
+    
   } finally {
     if (browser) {
       await browser.close();
