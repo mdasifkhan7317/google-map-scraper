@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "npx puppeteer browsers install chrome && node server.js",
     "install-browsers": "npx puppeteer browsers install chrome",
     "test": "node --check server.js && node --check scraper.js && node --check utils/excel.js"
   },
