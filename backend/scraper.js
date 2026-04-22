@@ -18,8 +18,100 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
 
+const extractCityFromAddress = (address, fallbackCity = 'N/A') => {
+  const normalizedAddress = normalizeText(address);
+  const normalizedFallbackCity = normalizeText(fallbackCity);
+  const addressLikePattern =
+    /\b(road|rd|street|st|sector|tower|complex|park|hotel|block|phase|plot|floor|building|plaza|mall|unit|colony|nagar|marg|cross|near|opposite)\b/i;
+  const knownStates = [
+    'andhra pradesh',
+    'arunachal pradesh',
+    'assam',
+    'bihar',
+    'chhattisgarh',
+    'goa',
+    'gujarat',
+    'haryana',
+    'himachal pradesh',
+    'jharkhand',
+    'karnataka',
+    'kerala',
+    'madhya pradesh',
+    'maharashtra',
+    'manipur',
+    'meghalaya',
+    'mizoram',
+    'nagaland',
+    'odisha',
+    'punjab',
+    'rajasthan',
+    'sikkim',
+    'tamil nadu',
+    'telangana',
+    'tripura',
+    'uttar pradesh',
+    'uttarakhand',
+    'west bengal',
+    'delhi',
+  ];
+
+  if (!normalizedAddress || normalizedAddress === 'N/A') {
+    return normalizedFallbackCity || 'N/A';
+  }
+
+  const commaSegments = normalizedAddress
+    .split(',')
+    .map((segment) => normalizeText(segment))
+    .filter(Boolean);
+
+  if (
+    normalizedFallbackCity &&
+    commaSegments.some(
+      (segment) => segment.toLowerCase() === normalizedFallbackCity.toLowerCase()
+    )
+  ) {
+    return normalizedFallbackCity;
+  }
+
+  const stateIndex = commaSegments.findIndex((segment) =>
+    knownStates.includes(segment.toLowerCase().replace(/\b\d{5,6}\b/g, '').trim())
+  );
+
+  if (stateIndex > 0) {
+    const previousSegment = normalizeText(commaSegments[stateIndex - 1]);
+
+    if (
+      previousSegment &&
+      !/\d{5,6}/.test(previousSegment) &&
+      !addressLikePattern.test(previousSegment)
+    ) {
+      return previousSegment;
+    }
+  }
+
+  for (let index = commaSegments.length - 1; index >= 0; index -= 1) {
+    const candidate = commaSegments[index]
+      .replace(/\b\d{5,6}\b/g, '')
+      .replace(
+        /\b(india|maharashtra|delhi|karnataka|telangana|gujarat|rajasthan|uttar pradesh|madhya pradesh|west bengal|tamil nadu|punjab|haryana|kerala|bihar|odisha|assam|jharkhand|chhattisgarh|andhra pradesh)\b/gi,
+        ''
+      );
+    const normalizedCandidate = normalizeText(candidate);
+
+    if (
+      normalizedCandidate &&
+      !/\d/.test(normalizedCandidate) &&
+      !addressLikePattern.test(normalizedCandidate)
+    ) {
+      return normalizedCandidate;
+    }
+  }
+
+  return normalizedFallbackCity || 'N/A';
+};
+
 const buildDeduplicationKey = (business) =>
-  [business.name, business.address, business.rating]
+  [business.companyName, business.location, business.rating]
     .map((value) => normalizeText(value).toLowerCase())
     .join('|');
 
@@ -49,59 +141,8 @@ const scrapeCardsFromPage = async (page) => {
           .replace(new RegExp(normalizeWhitespaceSource, 'g'), ' ')
           .trim();
 
-      const extractAddress = (textLines) => {
-        for (const line of textLines) {
-          const cleanedLine = normalizeWhitespace(line);
-
-          if (!cleanedLine) {
-            continue;
-          }
-
-          if (
-            /^(open|closed|closes|opens|busy|less busy|more busy|website|directions|call|hours?)\b/i.test(
-              cleanedLine
-            )
-          ) {
-            continue;
-          }
-
-          if (
-            /\b(st|street|rd|road|ave|avenue|ln|lane|dr|drive|blvd|boulevard|nagar|sector|market|marg|cross|floor|building|plaza|complex|mall|colony|area|near)\b/i.test(
-              cleanedLine
-            )
-          ) {
-            return cleanedLine.split('·').pop().trim();
-          }
-
-          const bulletSegments = cleanedLine
-            .split('·')
-            .map((segment) => normalizeWhitespace(segment))
-            .filter(Boolean);
-
-          if (bulletSegments.length >= 2) {
-            return bulletSegments[bulletSegments.length - 1];
-          }
-        }
-
-        return '';
-      };
-
-      const extractRating = (card) => {
-        const ratingNode =
-          card.querySelector('span[role="img"]') ||
-          card.querySelector('.MW4etd') ||
-          card.querySelector('[aria-label*="stars"]');
-
-        if (!ratingNode) {
-          return '';
-        }
-
-        const ariaLabel = normalizeWhitespace(ratingNode.getAttribute('aria-label'));
-        const nodeText = normalizeWhitespace(ratingNode.textContent);
-        const ratingMatch = (ariaLabel || nodeText).match(/\d+(?:\.\d+)?/);
-
-        return ratingMatch ? ratingMatch[0] : '';
-      };
+      const phonePattern =
+        /(?:\+91[\s-]?)?(?:0?\d{10}|(?:\d{3,5}[\s-]\d{5,8}))/;
 
       const getName = (card) => {
         const selectors = ['.qBF1Pd', '.fontHeadlineSmall', '[aria-label][role="link"]'];
@@ -117,35 +158,148 @@ const scrapeCardsFromPage = async (page) => {
           }
         }
 
-        const cardText = normalizeWhitespace(card.innerText);
-        return normalizeWhitespace(cardText.split('\n')[0]);
+        return '';
+      };
+
+      const getRating = (card) => {
+        const ratingNode =
+          card.querySelector('span[role="img"]') ||
+          card.querySelector('.MW4etd') ||
+          card.querySelector('[aria-label*="stars"]');
+
+        if (!ratingNode) {
+          return '';
+        }
+
+        const ratingSource = normalizeWhitespace(
+          ratingNode.getAttribute('aria-label') || ratingNode.textContent
+        );
+        const match = ratingSource.match(/\d+(?:\.\d+)?/);
+
+        return match ? match[0] : '';
+      };
+
+      const getCategory = (lines) => {
+        for (const line of lines) {
+          const cleanedLine = normalizeWhitespace(line);
+
+          if (
+            !cleanedLine ||
+            /^(open|closed|closes|opens|hours?|website|directions|call)\b/i.test(
+              cleanedLine
+            )
+          ) {
+            continue;
+          }
+
+          const bulletSegments = cleanedLine
+            .split('·')
+            .map((segment) => normalizeWhitespace(segment))
+            .filter(Boolean);
+
+          if (bulletSegments.length >= 2 && !phonePattern.test(bulletSegments[0])) {
+            return bulletSegments[0];
+          }
+        }
+
+        return '';
+      };
+
+      const getAddress = (lines) => {
+        for (const line of lines) {
+          const cleanedLine = normalizeWhitespace(line);
+
+          if (
+            !cleanedLine ||
+            /^(open|closed|closes|opens|hours?|website|directions|call)\b/i.test(
+              cleanedLine
+            )
+          ) {
+            continue;
+          }
+
+          const bulletSegments = cleanedLine
+            .split('·')
+            .map((segment) => normalizeWhitespace(segment))
+            .filter(Boolean);
+
+          if (bulletSegments.length >= 2) {
+            const candidate = bulletSegments[bulletSegments.length - 1];
+
+            if (
+              candidate &&
+              !phonePattern.test(candidate) &&
+              !/(website|directions|call)/i.test(candidate)
+            ) {
+              return candidate;
+            }
+          }
+
+          if (
+            /\b(st|street|rd|road|ave|avenue|ln|lane|dr|drive|blvd|boulevard|nagar|sector|market|marg|cross|floor|building|plaza|complex|mall|colony|area|near|opposite|tower|phase|block)\b/i.test(
+              cleanedLine
+            ) &&
+            !phonePattern.test(cleanedLine)
+          ) {
+            return cleanedLine;
+          }
+        }
+
+        return '';
+      };
+
+      const getPhone = (lines) => {
+        for (const line of lines) {
+          const cleanedLine = normalizeWhitespace(line);
+          const bulletSegments = cleanedLine
+            .split('·')
+            .map((segment) => normalizeWhitespace(segment))
+            .filter(Boolean);
+
+          for (const segment of [cleanedLine, ...bulletSegments]) {
+            const match = segment.match(phonePattern);
+
+            if (match) {
+              return normalizeWhitespace(match[0]);
+            }
+          }
+        }
+
+        return '';
       };
 
       const cards = Array.from(document.querySelectorAll('div.Nv2PK'));
 
       return cards
         .map((card) => {
-          const name = getName(card);
-          const rating = extractRating(card);
-          const lines = normalizeWhitespace(card.innerText)
+          const lines = String(card.innerText || '')
             .split('\n')
             .map((line) => normalizeWhitespace(line))
             .filter(Boolean);
-          const address = extractAddress(lines);
 
           return {
-            name,
-            rating,
-            address,
+            companyName: getName(card),
+            rating: getRating(card),
+            category: getCategory(lines),
+            location: getAddress(lines),
+            mobile: getPhone(lines),
+            website:
+              card.querySelector('a[aria-label^="Visit "]')?.href ||
+              card.querySelector('a[href^="http"]:not([href*="google.com"])')?.href ||
+              '',
           };
         })
-        .filter((business) => business.name);
+        .filter((business) => business.companyName);
     },
     { normalizeWhitespaceSource: '\\s+' }
   );
 };
 
-const autoScrollResults = async (page, iterations = SCROLL_ITERATIONS) => {
+const autoScrollResults = async (
+  page,
+  iterations = SCROLL_ITERATIONS,
+  onProgress = () => {}
+) => {
   await page.waitForSelector('div[role="feed"]', {
     timeout: NAVIGATION_TIMEOUT_MS,
   });
@@ -165,6 +319,10 @@ const autoScrollResults = async (page, iterations = SCROLL_ITERATIONS) => {
     });
 
     await delay(SCROLL_DELAY_MS);
+    onProgress({
+      stage: 'collecting',
+      progress: Math.min(85, Math.round(((index + 1) / iterations) * 85)),
+    });
 
     if (currentHeight === previousHeight) {
       continue;
@@ -185,7 +343,7 @@ const waitForResults = async (page) => {
   ]);
 };
 
-const scrapeGoogleMaps = async ({ query, location }) => {
+const scrapeGoogleMaps = async ({ query, location, onProgress = () => {} }) => {
   const safeQuery = normalizeText(query);
   const safeLocation = normalizeText(location);
 
@@ -200,20 +358,16 @@ const scrapeGoogleMaps = async ({ query, location }) => {
   let browser;
 
   try {
-    // browser = await puppeteer.launch({
-    //   headless: true,
-    //   args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    // });
     browser = await puppeteer.launch({
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--single-process',
-      '--disable-gpu',
-    ],
-  });
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--single-process',
+        '--disable-gpu',
+      ],
+    });
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 1024 });
@@ -222,32 +376,74 @@ const scrapeGoogleMaps = async ({ query, location }) => {
     const searchText = `${safeQuery} ${safeLocation}`;
     const searchUrl = `${GOOGLE_MAPS_URL}/search/${encodeURIComponent(searchText)}`;
 
+    onProgress({
+      stage: 'opening',
+      progress: 5,
+      collectedCount: 0,
+    });
+
     await page.goto(searchUrl, {
       waitUntil: 'networkidle2',
       timeout: NAVIGATION_TIMEOUT_MS,
     });
 
+    onProgress({
+      stage: 'loading-results',
+      progress: 20,
+      collectedCount: 0,
+    });
+
     await waitForResults(page);
     await delay(2500);
-    await autoScrollResults(page);
+    await autoScrollResults(page, SCROLL_ITERATIONS, onProgress);
+
+    onProgress({
+      stage: 'processing',
+      progress: 92,
+      collectedCount: 0,
+    });
 
     const businesses = dedupeBusinesses(await scrapeCardsFromPage(page));
+    const totalCollected = businesses.length;
 
-    return businesses.map((business) => ({
-      name: normalizeText(business.name) || 'N/A',
-      rating: normalizeText(business.rating) || 'N/A',
-      address: normalizeText(business.address) || 'N/A',
-    }));
-  // } catch (error) {
-  //   if (error instanceof ScraperError) {
-  //     throw error;
-  //   }
+    onProgress({
+      stage: 'finalizing',
+      progress: 98,
+      collectedCount: totalCollected,
+    });
 
-  //   throw new ScraperError('Failed to scrape Google Maps results.', 500, {
-  //     message: error.message,
-  //   });
-    } catch (error) {
+    const formattedBusinesses = businesses.map((business) => {
+      const companyName = normalizeText(business.companyName) || 'N/A';
+      const businessLocation = normalizeText(business.location) || 'N/A';
+      const category = normalizeText(business.category || safeQuery) || 'N/A';
+      const mobile = normalizeText(business.mobile) || 'N/A';
+      const website = normalizeText(business.website) || 'N/A';
+      const rating = normalizeText(business.rating) || 'N/A';
+      const city = extractCityFromAddress(businessLocation, safeLocation);
+
+      return {
+        companyName,
+        mobile,
+        website,
+        location: businessLocation,
+        category,
+        city,
+        rating,
+        name: companyName,
+        address: businessLocation,
+      };
+    });
+
+    onProgress({
+      stage: 'completed',
+      progress: 100,
+      collectedCount: formattedBusinesses.length,
+    });
+
+    return formattedBusinesses;
+  } catch (error) {
     console.error('Scraper failure:', error);
+
     if (error instanceof ScraperError) {
       throw error;
     }
@@ -256,8 +452,6 @@ const scrapeGoogleMaps = async ({ query, location }) => {
       message: error.message,
       stack: error.stack,
     });
-
-    
   } finally {
     if (browser) {
       await browser.close();

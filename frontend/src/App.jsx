@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 
 const api = axios.create({
@@ -25,6 +25,48 @@ function App() {
   const [error, setError] = useState('')
   const [isSearching, setIsSearching] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
+  const [searchProgress, setSearchProgress] = useState({
+    progress: 0,
+    collectedCount: 0,
+    stage: 'idle',
+  })
+  const progressIntervalRef = useRef(null)
+  const hasResults = businesses.length > 0
+  const isDownloadReady = hasResults && !isSearching && !isExporting
+
+  useEffect(() => {
+    return () => {
+      if (progressIntervalRef.current) {
+        window.clearInterval(progressIntervalRef.current)
+      }
+    }
+  }, [])
+
+  const stopProgressPolling = () => {
+    if (progressIntervalRef.current) {
+      window.clearInterval(progressIntervalRef.current)
+      progressIntervalRef.current = null
+    }
+  }
+
+  const fetchSearchProgress = async () => {
+    try {
+      const response = await api.get('/api/search-progress')
+      setSearchProgress({
+        progress: response.data.progress ?? 0,
+        collectedCount: response.data.collectedCount ?? 0,
+        stage: response.data.stage ?? 'searching',
+      })
+    } catch {
+      // Keep the search flow resilient even if progress polling fails briefly.
+    }
+  }
+
+  const startProgressPolling = () => {
+    stopProgressPolling()
+    fetchSearchProgress()
+    progressIntervalRef.current = window.setInterval(fetchSearchProgress, 1200)
+  }
 
   const handleSearch = async (event) => {
     event.preventDefault()
@@ -39,6 +81,12 @@ function App() {
 
     setIsSearching(true)
     setError('')
+    setSearchProgress({
+      progress: 0,
+      collectedCount: 0,
+      stage: 'starting',
+    })
+    startProgressPolling()
 
     try {
       const response = await api.get('/api/search', {
@@ -46,12 +94,22 @@ function App() {
       })
 
       setBusinesses(response.data.businesses ?? [])
+      setSearchProgress({
+        progress: 100,
+        collectedCount: response.data.businesses?.length ?? 0,
+        stage: 'completed',
+      })
     } catch (searchError) {
       setBusinesses([])
       setError(
         getErrorMessage(searchError, 'Unable to scrape Google Maps right now.')
       )
+      setSearchProgress((currentProgress) => ({
+        ...currentProgress,
+        stage: 'failed',
+      }))
     } finally {
+      stopProgressPolling()
       setIsSearching(false)
     }
   }
@@ -193,14 +251,47 @@ function App() {
                   </button>
 
                   <button
-                    className="inline-flex flex-1 items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+                    className={`inline-flex flex-1 items-center justify-center rounded-2xl border px-4 py-3 text-sm font-semibold transition ${
+                      isDownloadReady
+                        ? 'border-emerald-300/40 bg-emerald-400 text-slate-950 shadow-xl shadow-emerald-950/30 hover:bg-emerald-300'
+                        : 'border-white/10 bg-white/5 text-white hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50'
+                    }`}
                     type="button"
-                    disabled={businesses.length === 0 || isExporting || isSearching}
+                    disabled={!isDownloadReady}
                     onClick={handleExport}
                   >
                     {isExporting ? 'Preparing Excel...' : 'Download Excel'}
                   </button>
                 </div>
+
+                {isDownloadReady ? (
+                  <p className="text-sm font-medium text-emerald-200">
+                    Search complete. Your Excel file is ready to download.
+                  </p>
+                ) : null}
+
+                {isSearching ? (
+                  <div className="rounded-2xl border border-sky-400/20 bg-sky-400/10 p-4">
+                    <div className="flex items-center justify-between gap-4 text-sm">
+                      <span className="font-medium text-slate-100">
+                        Collecting business data...
+                      </span>
+                      <span className="font-semibold text-sky-200">
+                        {searchProgress.progress}%
+                      </span>
+                    </div>
+                    <div className="mt-3 h-3 overflow-hidden rounded-full bg-slate-950/70">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-sky-400 via-emerald-400 to-emerald-300 transition-all duration-500"
+                        style={{ width: `${searchProgress.progress}%` }}
+                      />
+                    </div>
+                    <div className="mt-3 flex items-center justify-between gap-4 text-xs uppercase tracking-[0.2em] text-slate-300">
+                      <span>{searchProgress.stage.replace('-', ' ')}</span>
+                      <span>{searchProgress.collectedCount} records found</span>
+                    </div>
+                  </div>
+                ) : null}
               </form>
             </div>
           </div>
@@ -219,6 +310,10 @@ function App() {
               <p className="mt-4 text-sm text-slate-300">
                 Scraping Google Maps results...
               </p>
+              <p className="mt-2 text-sm font-medium text-emerald-200">
+                {searchProgress.collectedCount} records collected •{' '}
+                {searchProgress.progress}% completed
+              </p>
             </div>
           ) : businesses.length === 0 ? (
             <div className="flex min-h-[320px] flex-col items-center justify-center rounded-[1.5rem] border border-dashed border-slate-700 bg-slate-950/40 px-6 text-center">
@@ -236,10 +331,22 @@ function App() {
                   <thead className="bg-slate-950/80">
                     <tr>
                       <th className="px-5 py-4 text-left text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
-                        Name
+                        Company Name
                       </th>
                       <th className="px-5 py-4 text-left text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
-                        Address
+                        Mobile
+                      </th>
+                      <th className="px-5 py-4 text-left text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
+                        Website
+                      </th>
+                      <th className="px-5 py-4 text-left text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
+                        Location
+                      </th>
+                      <th className="px-5 py-4 text-left text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
+                        Category
+                      </th>
+                      <th className="px-5 py-4 text-left text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
+                        City
                       </th>
                       <th className="px-5 py-4 text-left text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
                         Rating
@@ -250,13 +357,36 @@ function App() {
                     {businesses.map((business, index) => (
                       <tr
                         className="transition hover:bg-white/5"
-                        key={`${business.name}-${business.address}-${index}`}
+                        key={`${business.companyName || business.name}-${business.location || business.address}-${index}`}
                       >
                         <td className="px-5 py-4 text-sm font-medium text-white">
-                          {business.name || 'N/A'}
+                          {business.companyName || business.name || 'N/A'}
                         </td>
                         <td className="px-5 py-4 text-sm text-slate-300">
-                          {business.address || 'N/A'}
+                          {business.mobile || 'N/A'}
+                        </td>
+                        <td className="px-5 py-4 text-sm text-slate-300">
+                          {business.website && business.website !== 'N/A' ? (
+                            <a
+                              className="text-emerald-200 underline underline-offset-2"
+                              href={business.website}
+                              rel="noreferrer"
+                              target="_blank"
+                            >
+                              {business.website}
+                            </a>
+                          ) : (
+                            'N/A'
+                          )}
+                        </td>
+                        <td className="px-5 py-4 text-sm text-slate-300">
+                          {business.location || business.address || 'N/A'}
+                        </td>
+                        <td className="px-5 py-4 text-sm text-slate-300">
+                          {business.category || 'N/A'}
+                        </td>
+                        <td className="px-5 py-4 text-sm text-slate-300">
+                          {business.city || 'N/A'}
                         </td>
                         <td className="px-5 py-4 text-sm text-slate-300">
                           {business.rating || 'N/A'}

@@ -1,16 +1,24 @@
 const XLSX = require('xlsx');
 
 const EXCEL_COLUMNS = [
-  'name',
-  'address',
-  'rating',
+  'Company Name',
+  'Mobile',
+  'Website',
+  'Location',
+  'Category',
+  'City',
+  'Rating',
 ];
 
 const createBusinessWorkbookBuffer = (businesses) => {
   const rows = businesses.map((business) => ({
-    name: business.name,
-    address: business.address,
-    rating: business.rating,
+    'Company Name': business.companyName || business.name || 'N/A',
+    Mobile: business.mobile || 'N/A',
+    Website: business.website || 'N/A',
+    Location: business.location || business.address || 'N/A',
+    Category: business.category || 'N/A',
+    City: business.city || 'N/A',
+    Rating: business.rating || 'N/A',
   }));
 
   const worksheet = XLSX.utils.json_to_sheet(rows, {

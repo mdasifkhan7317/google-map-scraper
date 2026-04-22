@@ -16,11 +16,28 @@ let latestSearchCache = {
   createdAt: null,
 };
 
+let searchProgress = {
+  isSearching: false,
+  progress: 0,
+  collectedCount: 0,
+  query: '',
+  location: '',
+  stage: 'idle',
+  updatedAt: null,
+};
+
 app.use(cors());
 app.use(express.json());
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
+});
+
+app.get('/api/search-progress', (req, res) => {
+  res.status(200).json({
+    success: true,
+    ...searchProgress,
+  });
 });
 
 app.get('/api/search', async (req, res, next) => {
@@ -35,9 +52,29 @@ app.get('/api/search', async (req, res, next) => {
       throw new ScraperError('Query parameter "location" is required.', 400);
     }
 
+    searchProgress = {
+      isSearching: true,
+      progress: 0,
+      collectedCount: 0,
+      query: String(query).trim(),
+      location: String(location).trim(),
+      stage: 'starting',
+      updatedAt: new Date().toISOString(),
+    };
+
     const businesses = await scrapeGoogleMaps({
       query: String(query),
       location: String(location),
+      onProgress: ({ progress, collectedCount = 0, stage = 'searching' }) => {
+        searchProgress = {
+          ...searchProgress,
+          isSearching: true,
+          progress,
+          collectedCount,
+          stage,
+          updatedAt: new Date().toISOString(),
+        };
+      },
     });
 
     latestSearchCache = {
@@ -45,6 +82,16 @@ app.get('/api/search', async (req, res, next) => {
       query: String(query).trim(),
       location: String(location).trim(),
       createdAt: new Date().toISOString(),
+    };
+
+    searchProgress = {
+      isSearching: false,
+      progress: 100,
+      collectedCount: businesses.length,
+      query: latestSearchCache.query,
+      location: latestSearchCache.location,
+      stage: 'completed',
+      updatedAt: new Date().toISOString(),
     };
 
     res.status(200).json({
@@ -55,6 +102,12 @@ app.get('/api/search', async (req, res, next) => {
       location: latestSearchCache.location,
     });
   } catch (error) {
+    searchProgress = {
+      ...searchProgress,
+      isSearching: false,
+      stage: 'failed',
+      updatedAt: new Date().toISOString(),
+    };
     next(error);
   }
 });
