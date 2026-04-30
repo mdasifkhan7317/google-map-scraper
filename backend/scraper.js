@@ -1,8 +1,11 @@
 const puppeteer = require('puppeteer');
 
 const GOOGLE_MAPS_URL = 'https://www.google.com/maps';
-const SCROLL_ITERATIONS = 18;
-const SCROLL_DELAY_MS = 1500;
+const TARGET_RESULT_COUNT = 100;
+const MAX_SCROLL_ITERATIONS = 160;
+const MAX_EXPANSION_SEARCHES = 6;
+const SCROLL_DELAY_MS = 700;
+const INITIAL_RESULTS_DELAY_MS = 1200;
 const NAVIGATION_TIMEOUT_MS = 60000;
 
 class ScraperError extends Error {
@@ -110,10 +113,20 @@ const extractCityFromAddress = (address, fallbackCity = 'N/A') => {
   return normalizedFallbackCity || 'N/A';
 };
 
-const buildDeduplicationKey = (business) =>
-  [business.companyName, business.location, business.rating]
-    .map((value) => normalizeText(value).toLowerCase())
-    .join('|');
+const buildDeduplicationKey = (business) => {
+  const normalizedName = normalizeText(business.companyName).toLowerCase();
+  const normalizedWebsite = normalizeText(business.website).toLowerCase();
+  const normalizedPhone = normalizeText(business.mobile).toLowerCase();
+  const normalizedLocation = normalizeText(business.location).toLowerCase();
+  const normalizedCategory = normalizeText(business.category).toLowerCase();
+  const normalizedRating = normalizeText(business.rating).toLowerCase();
+
+  return [
+    normalizedName,
+    normalizedWebsite || normalizedPhone || normalizedLocation || normalizedCategory,
+    normalizedLocation || normalizedPhone || normalizedRating,
+  ].join('|');
+};
 
 const dedupeBusinesses = (businesses) => {
   const seen = new Set();
@@ -133,6 +146,57 @@ const dedupeBusinesses = (businesses) => {
   return uniqueBusinesses;
 };
 
+const mergeBusinesses = (existingBusinesses, newBusinesses) =>
+  dedupeBusinesses([...existingBusinesses, ...newBusinesses]);
+
+const rankSearchLocalities = (businesses, fallbackLocation) => {
+  const normalizedFallback = normalizeText(fallbackLocation).toLowerCase();
+  const localityCounts = new Map();
+  const blockedPattern =
+    /\b(road|rd|street|st|sector|tower|complex|park|hotel|block|phase|plot|floor|building|plaza|mall|unit|colony|nagar|marg|cross|near|opposite|india)\b/i;
+
+  for (const business of businesses) {
+    const addressSegments = normalizeText(business.location)
+      .split(',')
+      .map((segment) => normalizeText(segment))
+      .filter(Boolean);
+
+    for (const segment of addressSegments) {
+      const normalizedSegment = segment.toLowerCase();
+      const wordCount = segment.split(/\s+/).length;
+
+      if (
+        !segment ||
+        normalizedSegment === normalizedFallback ||
+        normalizedSegment.includes(normalizedFallback) ||
+        /\d{3,}/.test(segment) ||
+        blockedPattern.test(segment) ||
+        wordCount > 4
+      ) {
+        continue;
+      }
+
+      localityCounts.set(segment, (localityCounts.get(segment) || 0) + 1);
+    }
+  }
+
+  return [...localityCounts.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .map(([segment]) => segment);
+};
+
+const createProgressSnapshot = ({
+  collectedCount = 0,
+  iteration = 0,
+  maxIterations = MAX_SCROLL_ITERATIONS,
+  targetCount = TARGET_RESULT_COUNT,
+}) => {
+  const progressFromIterations = Math.round((iteration / Math.max(maxIterations, 1)) * 65);
+  const progressFromResults = Math.round((collectedCount / Math.max(targetCount, 1)) * 65);
+
+  return Math.min(88, 20 + Math.max(progressFromIterations, progressFromResults));
+};
+
 const scrapeCardsFromPage = async (page) => {
   return page.evaluate(
     ({ normalizeWhitespaceSource }) => {
@@ -142,7 +206,7 @@ const scrapeCardsFromPage = async (page) => {
           .trim();
 
       const phonePattern =
-        /(?:\+91[\s-]?)?(?:0?\d{10}|(?:\d{3,5}[\s-]\d{5,8}))/;
+        /(?:\+91[\s.-]?)?(?:\(0?\d{1,5}\)[\s.-]?)?(?:\d{3,4}[\s.-]?\d{3,4}[\s.-]?\d{3,4}|\d{10,12})/;
 
       const getName = (card) => {
         const selectors = ['.qBF1Pd', '.fontHeadlineSmall', '[aria-label][role="link"]'];
@@ -260,7 +324,25 @@ const scrapeCardsFromPage = async (page) => {
             const match = segment.match(phonePattern);
 
             if (match) {
-              return normalizeWhitespace(match[0]);
+              const phone = normalizeWhitespace(match[0]);
+              // Clean up the phone number to remove extra spaces/dashes
+              return phone.replace(/[\s.-]/g, '');
+            }
+          }
+        }
+
+        // Try a broader search if no phone found yet
+        for (const line of lines) {
+          const cleanedLine = normalizeWhitespace(line);
+          // Look for any sequence of digits that could be a phone number
+          const matches = cleanedLine.match(/\d{7,}/g);
+          if (matches && matches.length > 0) {
+            // Find the longest match that looks like a phone number
+            const phoneMatch = matches.find(
+              (match) => match.length >= 10 && match.length <= 13
+            );
+            if (phoneMatch) {
+              return phoneMatch;
             }
           }
         }
@@ -297,39 +379,99 @@ const scrapeCardsFromPage = async (page) => {
 
 const autoScrollResults = async (
   page,
-  iterations = SCROLL_ITERATIONS,
-  onProgress = () => {}
+  {
+    maxIterations = MAX_SCROLL_ITERATIONS,
+    targetCount = TARGET_RESULT_COUNT,
+    onProgress = () => {},
+  } = {}
 ) => {
-  await page.waitForSelector('div[role="feed"]', {
-    timeout: NAVIGATION_TIMEOUT_MS,
-  });
+  try {
+    await page.waitForSelector('div[role="feed"]', {
+      timeout: 5000,
+    });
+  } catch (error) {
+    return dedupeBusinesses(await scrapeCardsFromPage(page));
+  }
 
-  let previousHeight = 0;
+  let businesses = [];
+  let stagnantPasses = 0;
+  let previousCount = 0;
 
-  for (let index = 0; index < iterations; index += 1) {
-    const currentHeight = await page.evaluate(() => {
+  for (let index = 0; index < maxIterations; index += 1) {
+    const scrollState = await page.evaluate(() => {
       const feed = document.querySelector('div[role="feed"]');
 
       if (!feed) {
-        return 0;
+        return {
+          feedFound: false,
+          clientHeight: 0,
+          scrollHeight: 0,
+          scrollTop: 0,
+        };
       }
 
-      feed.scrollBy(0, feed.scrollHeight);
-      return feed.scrollHeight;
+      const scrollStep = Math.max(feed.clientHeight * 0.9, 900);
+      feed.scrollBy(0, scrollStep);
+
+      return {
+        feedFound: true,
+        clientHeight: feed.clientHeight,
+        scrollHeight: feed.scrollHeight,
+        scrollTop: feed.scrollTop,
+      };
     });
 
     await delay(SCROLL_DELAY_MS);
-    onProgress({
-      stage: 'collecting',
-      progress: Math.min(85, Math.round(((index + 1) / iterations) * 85)),
-    });
 
-    if (currentHeight === previousHeight) {
-      continue;
+    if (!scrollState.feedFound) {
+      break;
     }
 
-    previousHeight = currentHeight;
+    const shouldRefreshCards =
+      index === 0 || index % 2 === 1 || businesses.length < targetCount;
+
+    if (shouldRefreshCards) {
+      businesses = mergeBusinesses(businesses, await scrapeCardsFromPage(page));
+      const collectedCount = businesses.length;
+
+      onProgress({
+        stage: 'collecting',
+        progress: createProgressSnapshot({
+          collectedCount,
+          iteration: index + 1,
+          maxIterations,
+          targetCount,
+        }),
+        collectedCount,
+      });
+
+      if (collectedCount > previousCount) {
+        stagnantPasses = 0;
+      } else {
+        stagnantPasses += 1;
+      }
+
+      previousCount = collectedCount;
+
+      if (collectedCount >= targetCount) {
+        break;
+      }
+    }
+
+    const reachedEnd = await page.evaluate(() => {
+      const pageText = String(document.body?.innerText || '');
+      return /you.{0,2}ve reached the end of the list/i.test(pageText);
+    });
+
+    const isNearBottom =
+      scrollState.scrollTop + scrollState.clientHeight >= scrollState.scrollHeight - 24;
+
+    if (reachedEnd || (isNearBottom && stagnantPasses >= 4)) {
+      break;
+    }
   }
+
+  return mergeBusinesses(businesses, await scrapeCardsFromPage(page));
 };
 
 const waitForResults = async (page) => {
@@ -343,7 +485,49 @@ const waitForResults = async (page) => {
   ]);
 };
 
-const scrapeGoogleMaps = async ({ query, location, onProgress = () => {} }) => {
+const searchGoogleMapsPage = async ({
+  page,
+  searchText,
+  targetCount,
+  baseCollectedCount = 0,
+  stage = 'loading-results',
+  onProgress = () => {},
+}) => {
+  const searchUrl = `${GOOGLE_MAPS_URL}/search/${encodeURIComponent(searchText)}`;
+
+  onProgress({
+    stage,
+    progress: baseCollectedCount > 0 ? 24 : 20,
+    collectedCount: baseCollectedCount,
+  });
+
+  await page.goto(searchUrl, {
+    waitUntil: 'domcontentloaded',
+    timeout: NAVIGATION_TIMEOUT_MS,
+  });
+
+  await waitForResults(page);
+  await delay(INITIAL_RESULTS_DELAY_MS);
+
+  return autoScrollResults(page, {
+    maxIterations: MAX_SCROLL_ITERATIONS,
+    targetCount,
+    onProgress: ({ progress, collectedCount, stage: currentStage }) => {
+      onProgress({
+        stage: stage === 'loading-results' ? currentStage : stage,
+        progress,
+        collectedCount: baseCollectedCount + collectedCount,
+      });
+    },
+  });
+};
+
+const scrapeGoogleMaps = async ({
+  query,
+  location,
+  targetCount = TARGET_RESULT_COUNT,
+  onProgress = () => {},
+}) => {
   const safeQuery = normalizeText(query);
   const safeLocation = normalizeText(location);
 
@@ -372,9 +556,15 @@ const scrapeGoogleMaps = async ({ query, location, onProgress = () => {} }) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 1024 });
     await page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
+    await page.setRequestInterception(true);
+    page.on('request', (request) => {
+      if (['image', 'media', 'font'].includes(request.resourceType())) {
+        request.abort();
+        return;
+      }
 
-    const searchText = `${safeQuery} ${safeLocation}`;
-    const searchUrl = `${GOOGLE_MAPS_URL}/search/${encodeURIComponent(searchText)}`;
+      request.continue();
+    });
 
     onProgress({
       stage: 'opening',
@@ -382,28 +572,66 @@ const scrapeGoogleMaps = async ({ query, location, onProgress = () => {} }) => {
       collectedCount: 0,
     });
 
-    await page.goto(searchUrl, {
-      waitUntil: 'networkidle2',
-      timeout: NAVIGATION_TIMEOUT_MS,
+    let businesses = await searchGoogleMapsPage({
+      page,
+      searchText: `${safeQuery} ${safeLocation}`,
+      targetCount,
+      baseCollectedCount: 0,
+      onProgress,
     });
 
-    onProgress({
-      stage: 'loading-results',
-      progress: 20,
-      collectedCount: 0,
-    });
+    if (businesses.length < targetCount) {
+      const searchVariants = [
+        `${safeQuery} in ${safeLocation}`,
+        `${safeLocation} ${safeQuery}`,
+        `${safeQuery} near ${safeLocation}`,
+        ...rankSearchLocalities(businesses, safeLocation).map(
+          (locality) => `${safeQuery} ${locality} ${safeLocation}`
+        ),
+      ].filter(
+        (searchText, index, searchTexts) =>
+          searchTexts.indexOf(searchText) === index &&
+          searchText !== `${safeQuery} ${safeLocation}`
+      );
 
-    await waitForResults(page);
-    await delay(2500);
-    await autoScrollResults(page, SCROLL_ITERATIONS, onProgress);
+      for (
+        let index = 0;
+        index < searchVariants.length &&
+        index < MAX_EXPANSION_SEARCHES &&
+        businesses.length < targetCount;
+        index += 1
+      ) {
+        const variant = searchVariants[index];
+
+        onProgress({
+          stage: 'expanding-search',
+          progress: Math.min(88, 35 + index * 10),
+          collectedCount: businesses.length,
+        });
+
+        try {
+          const additionalBusinesses = await searchGoogleMapsPage({
+            page,
+            searchText: variant,
+            targetCount: Math.max(25, targetCount - businesses.length),
+            baseCollectedCount: businesses.length,
+            stage: 'expanding-search',
+            onProgress,
+          });
+
+          businesses = mergeBusinesses(businesses, additionalBusinesses);
+        } catch (error) {
+          console.warn(`Skipping expansion search "${variant}":`, error.message);
+        }
+      }
+    }
 
     onProgress({
       stage: 'processing',
       progress: 92,
-      collectedCount: 0,
+      collectedCount: businesses.length,
     });
 
-    const businesses = dedupeBusinesses(await scrapeCardsFromPage(page));
     const totalCollected = businesses.length;
 
     onProgress({
